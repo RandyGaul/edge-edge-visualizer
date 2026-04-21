@@ -2,7 +2,7 @@
 
 Interactive visualizer for edge-edge motion and signed separation between two box edges, with a live Gauss-map inset.
 
-**[Live web demo](https://randygaul.github.io/edge-edge-visualizer/)**
+**[Live web build](https://randygaul.github.io/edge-edge-visualizer/)**
 
 ## Controls
 

@@ -10,8 +10,13 @@ if(EMSCRIPTEN)
         "SHELL:-s USE_GLFW=3"
         "SHELL:-s LEGACY_GL_EMULATION=1"
         "SHELL:-s GL_UNSAFE_OPTS=0"
-        "SHELL:-s ALLOW_MEMORY_GROWTH=1"
         "SHELL:-s GL_FFP_ONLY=1"
+        "SHELL:-s ALLOW_MEMORY_GROWTH=1"
+        "SHELL:-s INITIAL_MEMORY=32MB"
+        "SHELL:-s STACK_SIZE=4MB"
+        "SHELL:-s ASSERTIONS=0"
+        "SHELL:-s EXIT_RUNTIME=0"
+        --shell-file=${CMAKE_SOURCE_DIR}/web/shell.html
         -lGL)
 else()
     add_executable(gauss_map_viz WIN32 gauss_map_viz.c)

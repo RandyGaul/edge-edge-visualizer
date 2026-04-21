@@ -211,7 +211,7 @@ enum { KEY_ESCAPE = 1, KEY_R = 2, KEY_LEFT = 3, KEY_RIGHT = 4 };
           double p1 = M_PI * ((double)(i + 1) / stacks - 0.5);
           double cp0 = cos(p0), sp0 = sin(p0);
           double cp1 = cos(p1), sp1 = sin(p1);
-          glBegin(GL_QUAD_STRIP);
+          glBegin(GL_TRIANGLE_STRIP);
           for (int j = 0; j <= slices; j++) {
               double th = 2.0 * M_PI * j / slices;
               double ct = cos(th), st = sin(th);
