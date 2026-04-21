@@ -33,25 +33,212 @@
  *   gcc gauss_map_viz.c -o gauss_map_viz.exe -lopengl32 -lglu32 -lgdi32 -luser32 -mwindows
  */
 
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <GL/gl.h>
-#include <GL/glu.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
-#ifdef _MSC_VER
-#pragma comment(lib, "opengl32.lib")
-#pragma comment(lib, "glu32.lib")
-#pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "user32.lib")
+#ifdef __EMSCRIPTEN__
+  #include <emscripten.h>
+  #include <GLFW/glfw3.h>
+  #include <GL/gl.h>
+#else
+  #define WIN32_LEAN_AND_MEAN
+  #include <windows.h>
+  #include <GL/gl.h>
+  #include <GL/glu.h>
+  #ifdef _MSC_VER
+    #pragma comment(lib, "opengl32.lib")
+    #pragma comment(lib, "glu32.lib")
+    #pragma comment(lib, "gdi32.lib")
+    #pragma comment(lib, "user32.lib")
+  #endif
 #endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+/* =================================================================
+ *  Platform wrapping API
+ *    - Event handlers: on_resize / on_mouse_down / on_mouse_up
+ *      / on_mouse_move / on_mouse_wheel / on_key_down  (shared)
+ *    - Swap:           plat_swap()                     (shared call)
+ *    - Invalidate:     PLAT_INVALIDATE()               (macro)
+ *  Everything else (windowing + main loop) is inside the
+ *  platform-specific block at the very end of this file.
+ * ================================================================= */
+
+enum { KEY_ESCAPE = 1, KEY_R = 2, KEY_LEFT = 3, KEY_RIGHT = 4 };
+
+#ifdef __EMSCRIPTEN__
+  static GLFWwindow *g_window = NULL;
+  #define PLAT_INVALIDATE() ((void)0)
+
+  /* WebGL (even with LEGACY_GL_EMULATION) is missing a few legacy entry
+     points.  Provide shims so the rest of the file compiles unchanged.  */
+
+  static void emu_glGetDoublev(GLenum e, double *out) {
+      float tmp[16];
+      glGetFloatv(e, tmp);
+      for (int i = 0; i < 16; i++) out[i] = (double)tmp[i];
+  }
+  #define glGetDoublev(e, p)  emu_glGetDoublev((e), (p))
+  #define glNormal3d(x, y, z) glNormal3f((float)(x), (float)(y), (float)(z))
+  #define glVertex3d(x, y, z) glVertex3f((float)(x), (float)(y), (float)(z))
+
+  static inline void emu_glMaterialf(GLenum face, GLenum pname, float v) {
+      float a[1] = { v };
+      glMaterialfv(face, pname, a);
+  }
+  #define glMaterialf(f, p, v) emu_glMaterialf((f), (p), (v))
+
+  /* --- Minimal inline GLU replacements (WebGL has no glu). --------- */
+
+  static void gluPerspective(double fovy, double aspect, double zn, double zf) {
+      double f = 1.0 / tan(fovy * 0.5 * M_PI / 180.0);
+      float m[16] = {
+          (float)(f/aspect), 0, 0, 0,
+          0, (float)f, 0, 0,
+          0, 0, (float)((zf+zn)/(zn-zf)), -1.0f,
+          0, 0, (float)((2.0*zf*zn)/(zn-zf)), 0
+      };
+      glMultMatrixf(m);
+  }
+
+  static void gluLookAt(double ex, double ey, double ez,
+                        double cx, double cy, double cz,
+                        double ux, double uy, double uz) {
+      double fx = cx-ex, fy = cy-ey, fz = cz-ez;
+      double fl = sqrt(fx*fx + fy*fy + fz*fz);
+      fx/=fl; fy/=fl; fz/=fl;
+      double sx = fy*uz - fz*uy, sy = fz*ux - fx*uz, sz = fx*uy - fy*ux;
+      double sl = sqrt(sx*sx + sy*sy + sz*sz);
+      sx/=sl; sy/=sl; sz/=sl;
+      double upx = sy*fz - sz*fy, upy = sz*fx - sx*fz, upz = sx*fy - sy*fx;
+      float m[16] = {
+          (float)sx, (float)upx, (float)-fx, 0,
+          (float)sy, (float)upy, (float)-fy, 0,
+          (float)sz, (float)upz, (float)-fz, 0,
+          0,         0,          0,          1
+      };
+      glMultMatrixf(m);
+      glTranslatef((float)-ex, (float)-ey, (float)-ez);
+  }
+
+  static void pm_mul_v4(const double m[16], const double v[4], double r[4]) {
+      for (int i = 0; i < 4; i++)
+          r[i] = m[i]*v[0] + m[i+4]*v[1] + m[i+8]*v[2] + m[i+12]*v[3];
+  }
+
+  static void pm_mul(const double a[16], const double b[16], double r[16]) {
+      for (int c = 0; c < 4; c++)
+          for (int ro = 0; ro < 4; ro++) {
+              double s = 0;
+              for (int k = 0; k < 4; k++) s += a[ro + k*4] * b[k + c*4];
+              r[ro + c*4] = s;
+          }
+  }
+
+  static int pm_invert(const double m[16], double inv[16]) {
+      inv[0]=m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+      inv[4]=-m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+      inv[8]=m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+      inv[12]=-m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+      inv[1]=-m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+      inv[5]=m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+      inv[9]=-m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+      inv[13]=m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+      inv[2]=m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+      inv[6]=-m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+      inv[10]=m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+      inv[14]=-m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+      inv[3]=-m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+      inv[7]=m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+      inv[11]=-m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+      inv[15]=m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+      double det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+      if (det == 0) return 0;
+      det = 1.0/det;
+      for (int i = 0; i < 16; i++) inv[i] *= det;
+      return 1;
+  }
+
+  static int gluProject(double ox, double oy, double oz,
+                        const double mv[16], const double pj[16], const int vp[4],
+                        double *wx, double *wy, double *wz) {
+      double v[4] = {ox, oy, oz, 1.0}, t[4], c[4];
+      pm_mul_v4(mv, v, t);
+      pm_mul_v4(pj, t, c);
+      if (c[3] == 0) return 0;
+      c[0]/=c[3]; c[1]/=c[3]; c[2]/=c[3];
+      *wx = vp[0] + (c[0]*0.5 + 0.5) * vp[2];
+      *wy = vp[1] + (c[1]*0.5 + 0.5) * vp[3];
+      *wz = c[2]*0.5 + 0.5;
+      return 1;
+  }
+
+  static int gluUnProject(double wx, double wy, double wz,
+                          const double mv[16], const double pj[16], const int vp[4],
+                          double *ox, double *oy, double *oz) {
+      double mvp[16], inv[16];
+      pm_mul(pj, mv, mvp);
+      if (!pm_invert(mvp, inv)) return 0;
+      double v[4] = {
+          (wx - vp[0]) / vp[2] * 2.0 - 1.0,
+          (wy - vp[1]) / vp[3] * 2.0 - 1.0,
+          wz * 2.0 - 1.0,
+          1.0
+      };
+      double r[4];
+      pm_mul_v4(inv, v, r);
+      if (r[3] == 0) return 0;
+      *ox = r[0]/r[3]; *oy = r[1]/r[3]; *oz = r[2]/r[3];
+      return 1;
+  }
+
+  typedef struct { int dummy; } GLUquadric;
+  #define GLU_FILL   0
+  #define GLU_SMOOTH 0
+  static GLUquadric *gluNewQuadric(void) { static GLUquadric q; return &q; }
+  static void gluQuadricDrawStyle(GLUquadric *q, int s) { (void)q; (void)s; }
+  static void gluQuadricNormals  (GLUquadric *q, int m) { (void)q; (void)m; }
+
+  static void gluSphere(GLUquadric *q, double r, int slices, int stacks) {
+      (void)q;
+      for (int i = 0; i < stacks; i++) {
+          double p0 = M_PI * ((double)i       / stacks - 0.5);
+          double p1 = M_PI * ((double)(i + 1) / stacks - 0.5);
+          double cp0 = cos(p0), sp0 = sin(p0);
+          double cp1 = cos(p1), sp1 = sin(p1);
+          glBegin(GL_QUAD_STRIP);
+          for (int j = 0; j <= slices; j++) {
+              double th = 2.0 * M_PI * j / slices;
+              double ct = cos(th), st = sin(th);
+              glNormal3d(cp1*ct, sp1, cp1*st);
+              glVertex3d(r*cp1*ct, r*sp1, r*cp1*st);
+              glNormal3d(cp0*ct, sp0, cp0*st);
+              glVertex3d(r*cp0*ct, r*sp0, r*cp0*st);
+          }
+          glEnd();
+      }
+  }
+
+#else
+  /* Desktop Win32. */
+  static HWND  g_hwnd;
+  static HDC   g_hdc;
+  static HGLRC g_hrc;
+  #define PLAT_INVALIDATE() InvalidateRect(g_hwnd, NULL, FALSE)
+#endif
+
+static void plat_swap(void) {
+#ifdef __EMSCRIPTEN__
+    if (g_window) glfwSwapBuffers(g_window);
+#else
+    SwapBuffers(g_hdc);
+#endif
+}
 
 /* =================================================================
  *  Vec3
@@ -421,9 +608,6 @@ static void box_edge_face_normals_world(const Box *b, float t,
  *  Application state
  * ================================================================= */
 
-static HWND  g_hwnd;
-static HDC   g_hdc;
-static HGLRC g_hrc;
 static int   win_w = 1200, win_h = 820;
 
 /* UI regions. */
@@ -519,6 +703,12 @@ static void reset_scene(void) {
  *  Font
  * ================================================================= */
 
+#ifdef __EMSCRIPTEN__
+/* Text rendering is stubbed on web -- labels won't appear, geometry still works. */
+static void init_font(void) {}
+static void gl_text_2d(int x, int y, const char *s) { (void)x; (void)y; (void)s; }
+static void gl_text_3d(Vec3 p, const char *s) { (void)p; (void)s; }
+#else
 static void init_font(void) {
     font_base = glGenLists(128);
     HFONT f = CreateFontA(
@@ -544,6 +734,7 @@ static void gl_text_3d(Vec3 p, const char *s) {
     glListBase(font_base);
     glCallLists((GLsizei)strlen(s), GL_UNSIGNED_BYTE, (const GLubyte *)s);
 }
+#endif
 
 /* =================================================================
  *  3-D drawing
@@ -1644,8 +1835,10 @@ static void render(void) {
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+#ifndef __EMSCRIPTEN__
         glEnable(GL_LINE_STIPPLE);
         glLineStipple(2, 0x00FF);
+#endif
         glLineWidth(1.0f);
 
         /* Box A's edge line (faint blue). */
@@ -1662,7 +1855,9 @@ static void render(void) {
         glVertex3f(bFar1.x, bFar1.y, bFar1.z);
         glEnd();
 
+#ifndef __EMSCRIPTEN__
         glDisable(GL_LINE_STIPPLE);
+#endif
         glDisable(GL_BLEND);
 
         /* Yellow common-perpendicular segment between the two
@@ -1731,7 +1926,7 @@ static void render(void) {
     glDisable(GL_LINE_SMOOTH);
     glDisable(GL_POINT_SMOOTH);
 
-    SwapBuffers(g_hdc);
+    plat_swap();
 }
 
 /* =================================================================
@@ -1759,18 +1954,214 @@ static void trackball_rotate_box(Box *b,
 }
 
 /* =================================================================
- *  Window proc
+ *  Shared event handlers (called from both Win32 wndproc and GLFW).
  * ================================================================= */
+
+static void on_resize(int w, int h) {
+    win_w = w;
+    win_h = (h < 1) ? 1 : h;
+    glViewport(0, 0, win_w, win_h);
+    PLAT_INVALIDATE();
+}
+
+static void on_mouse_down(int button, int mx, int my) {
+    mx_prev = mx; my_prev = my;
+    if (button == 0) {
+        if (slider_hit(mx, my) || my < SLIDER_H) {
+            slider_drag = true;
+            slider_update(mx);
+        } else if (plot_hit(my)) {
+            slider_drag = true;
+            int px0 = plot_x0(), px1 = plot_x1();
+            float tv = (float)(mx - px0) / (float)(px1 - px0);
+            if (tv < 0) tv = 0;
+            if (tv > 1) tv = 1;
+            t_cur = tv;
+        } else if (rot_slider_hit(mx, my, 0)) {
+            rot_slider_drag = 0;
+            rot_slider_update(my, 0);
+        } else if (rot_slider_hit(mx, my, 1)) {
+            rot_slider_drag = 1;
+            rot_slider_update(my, 1);
+        } else if (inset_hit(mx, my)) {
+            inset_drag = true;
+        } else {
+            lmb_down = true;
+        }
+    } else if (button == 1) {
+        if (my > SLIDER_H && !plot_hit(my) && !inset_hit(mx, my)
+                          && mx > SIDEBAR_W) {
+            rmb_down = true;
+            box_drag_idx = pick_box(mx, my);
+        }
+    }
+    PLAT_INVALIDATE();
+}
+
+static void on_mouse_up(int button) {
+    if (button == 0) {
+        lmb_down = false;
+        slider_drag = false;
+        inset_drag = false;
+        rot_slider_drag = -1;
+    } else if (button == 1) {
+        rmb_down = false;
+        box_drag_idx = -1;
+    }
+}
+
+static void on_mouse_move(int mx, int my) {
+    int dx = mx - mx_prev;
+    int dy = my - my_prev;
+
+    if (slider_drag) {
+        if (my < SLIDER_H + 40) {
+            slider_update(mx);
+        } else if (plot_hit(my)) {
+            int px0 = plot_x0(), px1 = plot_x1();
+            float tv = (float)(mx - px0) / (float)(px1 - px0);
+            if (tv < 0) tv = 0;
+            if (tv > 1) tv = 1;
+            t_cur = tv;
+        } else {
+            slider_update(mx);
+        }
+        PLAT_INVALIDATE();
+    } else if (rot_slider_drag >= 0) {
+        rot_slider_update(my, rot_slider_drag);
+        PLAT_INVALIDATE();
+    } else if (inset_drag) {
+        cam_az_g -= dx * 0.008f;
+        cam_el_g += dy * 0.008f;
+        if (cam_el_g >  1.5f) cam_el_g =  1.5f;
+        if (cam_el_g < -1.5f) cam_el_g = -1.5f;
+        PLAT_INVALIDATE();
+    } else if (lmb_down) {
+        cam_az -= dx * 0.005f;
+        cam_el += dy * 0.005f;
+        if (cam_el >  1.5f) cam_el =  1.5f;
+        if (cam_el < -1.5f) cam_el = -1.5f;
+        PLAT_INVALIDATE();
+    } else if (rmb_down && box_drag_idx >= 0) {
+        Box *b = (box_drag_idx == 0) ? &box_a : &box_b;
+        trackball_rotate_box(b, mx_prev, my_prev, mx, my);
+        PLAT_INVALIDATE();
+    }
+
+    mx_prev = mx;
+    my_prev = my;
+}
+
+/* `delta` is normalised: 1.0 = one wheel click up, -1.0 = one click down. */
+static void on_mouse_wheel(float delta, int mx, int my) {
+    if (inset_hit(mx, my)) {
+        cam_dist_g -= delta * 0.24f;
+        if (cam_dist_g < 1.8f) cam_dist_g = 1.8f;
+        if (cam_dist_g > 8.0f) cam_dist_g = 8.0f;
+    } else {
+        cam_dist -= delta * 0.60f;
+        if (cam_dist < 2.0f)  cam_dist = 2.0f;
+        if (cam_dist > 20.0f) cam_dist = 20.0f;
+    }
+    PLAT_INVALIDATE();
+}
+
+static void on_key_down(int key) {
+    if (key == KEY_ESCAPE) {
+#ifndef __EMSCRIPTEN__
+        PostQuitMessage(0);
+#endif
+    } else if (key == KEY_R) {
+        reset_scene();
+        PLAT_INVALIDATE();
+    } else if (key == KEY_LEFT) {
+        t_cur -= 0.01f;
+        if (t_cur < 0) t_cur = 0;
+        PLAT_INVALIDATE();
+    } else if (key == KEY_RIGHT) {
+        t_cur += 0.01f;
+        if (t_cur > 1) t_cur = 1;
+        PLAT_INVALIDATE();
+    }
+}
+
+/* =================================================================
+ *  Platform layer: windowing, main loop, entry point
+ * ================================================================= */
+
+#ifdef __EMSCRIPTEN__
+
+static void web_fb_size(GLFWwindow *w, int ww, int hh) {
+    (void)w; on_resize(ww, hh);
+}
+
+static void web_cursor_pos(GLFWwindow *w, double x, double y) {
+    (void)w; on_mouse_move((int)x, (int)y);
+}
+
+static void web_mouse_button(GLFWwindow *w, int b, int action, int mods) {
+    (void)w; (void)mods;
+    double x, y;
+    glfwGetCursorPos(w, &x, &y);
+    int btn = (b == GLFW_MOUSE_BUTTON_LEFT) ? 0
+            : (b == GLFW_MOUSE_BUTTON_RIGHT) ? 1 : -1;
+    if (btn < 0) return;
+    if (action == GLFW_PRESS)        on_mouse_down(btn, (int)x, (int)y);
+    else if (action == GLFW_RELEASE) on_mouse_up(btn);
+}
+
+static void web_scroll(GLFWwindow *w, double dx, double dy) {
+    (void)dx;
+    double x, y;
+    glfwGetCursorPos(w, &x, &y);
+    on_mouse_wheel((float)dy, (int)x, (int)y);
+}
+
+static void web_key(GLFWwindow *w, int key, int sc, int action, int mods) {
+    (void)w; (void)sc; (void)mods;
+    if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
+    int k = 0;
+    switch (key) {
+        case GLFW_KEY_ESCAPE: k = KEY_ESCAPE; break;
+        case GLFW_KEY_R:      k = KEY_R;      break;
+        case GLFW_KEY_LEFT:   k = KEY_LEFT;   break;
+        case GLFW_KEY_RIGHT:  k = KEY_RIGHT;  break;
+        default: return;
+    }
+    on_key_down(k);
+}
+
+static void web_frame(void) {
+    glfwPollEvents();
+    render();
+}
+
+int main(void) {
+    reset_scene();
+
+    if (!glfwInit()) return 1;
+    g_window = glfwCreateWindow(win_w, win_h,
+        "Edge-Edge Motion  |  Signed Separation", NULL, NULL);
+    if (!g_window) { glfwTerminate(); return 1; }
+    glfwMakeContextCurrent(g_window);
+
+    glfwSetFramebufferSizeCallback(g_window, web_fb_size);
+    glfwSetCursorPosCallback      (g_window, web_cursor_pos);
+    glfwSetMouseButtonCallback    (g_window, web_mouse_button);
+    glfwSetScrollCallback         (g_window, web_scroll);
+    glfwSetKeyCallback            (g_window, web_key);
+
+    init_font();
+    emscripten_set_main_loop(web_frame, 0, 1);
+    return 0;
+}
+
+#else  /* Windows */
 
 static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-
     case WM_SIZE:
-        win_w = LOWORD(lp);
-        win_h = HIWORD(lp);
-        if (win_h < 1) win_h = 1;
-        glViewport(0, 0, win_w, win_h);
-        InvalidateRect(hw, NULL, FALSE);
+        on_resize(LOWORD(lp), HIWORD(lp));
         return 0;
 
     case WM_PAINT: {
@@ -1784,151 +2175,43 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND:
         return 1;
 
-    /* ---- left mouse ---- */
-    case WM_LBUTTONDOWN: {
-        int mx = (short)LOWORD(lp);
-        int my = (short)HIWORD(lp);
-        mx_prev = mx; my_prev = my;
-
-        if (slider_hit(mx, my) || my < SLIDER_H) {
-            slider_drag = true;
-            slider_update(mx);
-            InvalidateRect(hw, NULL, FALSE);
-        } else if (plot_hit(my)) {
-            slider_drag = true;
-            int px0 = plot_x0(), px1 = plot_x1();
-            float tv = (float)(mx - px0) / (float)(px1 - px0);
-            if (tv < 0) tv = 0;
-            if (tv > 1) tv = 1;
-            t_cur = tv;
-            InvalidateRect(hw, NULL, FALSE);
-        } else if (rot_slider_hit(mx, my, 0)) {
-            rot_slider_drag = 0;
-            rot_slider_update(my, 0);
-            InvalidateRect(hw, NULL, FALSE);
-        } else if (rot_slider_hit(mx, my, 1)) {
-            rot_slider_drag = 1;
-            rot_slider_update(my, 1);
-            InvalidateRect(hw, NULL, FALSE);
-        } else if (inset_hit(mx, my)) {
-            inset_drag = true;
-        } else {
-            lmb_down = true;
-        }
+    case WM_LBUTTONDOWN:
+        on_mouse_down(0, (short)LOWORD(lp), (short)HIWORD(lp));
         SetCapture(hw);
         return 0;
-    }
 
     case WM_LBUTTONUP:
-        lmb_down = false;
-        slider_drag = false;
-        inset_drag = false;
-        rot_slider_drag = -1;
+        on_mouse_up(0);
         ReleaseCapture();
         return 0;
 
-    /* ---- right mouse: virtual-trackball rotate nearest box ---- */
-    case WM_RBUTTONDOWN: {
-        int mx = (short)LOWORD(lp);
-        int my = (short)HIWORD(lp);
-        mx_prev = mx; my_prev = my;
-        if (my > SLIDER_H && !plot_hit(my) && !inset_hit(mx, my)
-                          && mx > SIDEBAR_W) {
-            rmb_down = true;
-            box_drag_idx = pick_box(mx, my);
-            SetCapture(hw);
-        }
+    case WM_RBUTTONDOWN:
+        on_mouse_down(1, (short)LOWORD(lp), (short)HIWORD(lp));
+        if (rmb_down) SetCapture(hw);
         return 0;
-    }
 
     case WM_RBUTTONUP:
-        rmb_down = false;
-        box_drag_idx = -1;
+        on_mouse_up(1);
         ReleaseCapture();
         return 0;
 
-    /* ---- mouse move ---- */
-    case WM_MOUSEMOVE: {
-        int mx = (short)LOWORD(lp);
-        int my = (short)HIWORD(lp);
-        int dx = mx - mx_prev;
-        int dy = my - my_prev;
-
-        if (slider_drag) {
-            if (my < SLIDER_H + 40) {
-                slider_update(mx);
-            } else if (plot_hit(my)) {
-                int px0 = plot_x0(), px1 = plot_x1();
-                float tv = (float)(mx - px0) / (float)(px1 - px0);
-                if (tv < 0) tv = 0;
-                if (tv > 1) tv = 1;
-                t_cur = tv;
-            } else {
-                slider_update(mx);
-            }
-            InvalidateRect(hw, NULL, FALSE);
-        } else if (rot_slider_drag >= 0) {
-            rot_slider_update(my, rot_slider_drag);
-            InvalidateRect(hw, NULL, FALSE);
-        } else if (inset_drag) {
-            cam_az_g -= dx * 0.008f;
-            cam_el_g += dy * 0.008f;
-            if (cam_el_g >  1.5f) cam_el_g =  1.5f;
-            if (cam_el_g < -1.5f) cam_el_g = -1.5f;
-            InvalidateRect(hw, NULL, FALSE);
-        } else if (lmb_down) {
-            cam_az -= dx * 0.005f;
-            cam_el += dy * 0.005f;
-            if (cam_el >  1.5f) cam_el =  1.5f;
-            if (cam_el < -1.5f) cam_el = -1.5f;
-            InvalidateRect(hw, NULL, FALSE);
-        } else if (rmb_down && box_drag_idx >= 0) {
-            Box *b = (box_drag_idx == 0) ? &box_a : &box_b;
-            trackball_rotate_box(b, mx_prev, my_prev, mx, my);
-            InvalidateRect(hw, NULL, FALSE);
-        }
-
-        mx_prev = mx;
-        my_prev = my;
+    case WM_MOUSEMOVE:
+        on_mouse_move((short)LOWORD(lp), (short)HIWORD(lp));
         return 0;
-    }
 
-    /* ---- scroll zoom (routes to whichever panel the cursor is over) - */
     case WM_MOUSEWHEEL: {
         short delta = (short)HIWORD(wp);
         POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
         ScreenToClient(hw, &pt);
-        if (inset_hit(pt.x, pt.y)) {
-            cam_dist_g -= delta * 0.002f;
-            if (cam_dist_g < 1.8f) cam_dist_g = 1.8f;
-            if (cam_dist_g > 8.0f) cam_dist_g = 8.0f;
-        } else {
-            cam_dist -= delta * 0.005f;
-            if (cam_dist < 2.0f)  cam_dist = 2.0f;
-            if (cam_dist > 20.0f) cam_dist = 20.0f;
-        }
-        InvalidateRect(hw, NULL, FALSE);
+        on_mouse_wheel((float)delta / (float)WHEEL_DELTA, pt.x, pt.y);
         return 0;
     }
 
-    /* ---- keyboard ---- */
     case WM_KEYDOWN:
-        if (wp == VK_ESCAPE) PostQuitMessage(0);
-        if (wp == 'R') {
-            reset_scene();
-            InvalidateRect(hw, NULL, FALSE);
-        }
-        /* Left / right nudge time by 1/100. */
-        if (wp == VK_LEFT) {
-            t_cur -= 0.01f;
-            if (t_cur < 0) t_cur = 0;
-            InvalidateRect(hw, NULL, FALSE);
-        }
-        if (wp == VK_RIGHT) {
-            t_cur += 0.01f;
-            if (t_cur > 1) t_cur = 1;
-            InvalidateRect(hw, NULL, FALSE);
-        }
+        if (wp == VK_ESCAPE) on_key_down(KEY_ESCAPE);
+        else if (wp == 'R')  on_key_down(KEY_R);
+        else if (wp == VK_LEFT)  on_key_down(KEY_LEFT);
+        else if (wp == VK_RIGHT) on_key_down(KEY_RIGHT);
         return 0;
 
     case WM_DESTROY:
@@ -1937,10 +2220,6 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
     }
     return DefWindowProcA(hw, msg, wp, lp);
 }
-
-/* =================================================================
- *  OpenGL context
- * ================================================================= */
 
 static bool init_gl(HWND hw) {
     PIXELFORMATDESCRIPTOR pfd = {0};
@@ -1962,10 +2241,6 @@ static bool init_gl(HWND hw) {
     wglMakeCurrent(g_hdc, g_hrc);
     return true;
 }
-
-/* =================================================================
- *  Entry
- * ================================================================= */
 
 int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     (void)prev; (void)cmd;
@@ -2006,3 +2281,5 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
     ReleaseDC(g_hwnd, g_hdc);
     return (int)m.wParam;
 }
+
+#endif

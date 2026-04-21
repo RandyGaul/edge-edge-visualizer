@@ -3,6 +3,7 @@
 
 # Build output
 build/
+build_web/
 out/
 bin/
 obj/
