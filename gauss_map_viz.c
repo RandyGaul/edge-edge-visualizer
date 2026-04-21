@@ -1498,7 +1498,7 @@ static int pick_box(int mx, int my_top) {
 /* All using (x-from-left, y-from-top) pixel coords. */
 
 /* Slider track. */
-static int slider_x0(void) { return 60; }
+static int slider_x0(void) { return 100; }
 static int slider_x1(void) { return win_w - 20; }
 static int slider_y (void) { return SLIDER_H / 2; }
 
