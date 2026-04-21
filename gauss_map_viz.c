@@ -1498,7 +1498,7 @@ static int pick_box(int mx, int my_top) {
 /* All using (x-from-left, y-from-top) pixel coords. */
 
 /* Slider track. */
-static int slider_x0(void) { return 100; }
+static int slider_x0(void) { return 84; }
 static int slider_x1(void) { return win_w - 20; }
 static int slider_y (void) { return SLIDER_H / 2; }
 
@@ -1556,7 +1556,7 @@ static void slider_update(int mx) {
 }
 
 /* Plot area (bottom strip). */
-static int plot_x0(void) { return 60; }
+static int plot_x0(void) { return 84; }
 static int plot_x1(void) { return win_w - 20; }
 static int plot_y_top(void) { return win_h - PLOT_H + 14; }   /* y-from-top */
 static int plot_y_bot(void) { return win_h - 14; }
