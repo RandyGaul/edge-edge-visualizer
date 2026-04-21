@@ -196,6 +196,9 @@ static void viz_load_gl_funcs(void) {
 #ifndef GL_PROGRAM_POINT_SIZE
   #define GL_PROGRAM_POINT_SIZE 0x8642
 #endif
+#ifndef GL_MULTISAMPLE
+  #define GL_MULTISAMPLE        0x809D
+#endif
 
 #else  /* __EMSCRIPTEN__ */
 static void viz_load_gl_funcs(void) {}
@@ -472,6 +475,7 @@ static void viz_init_gl(void) {
 
 #ifndef __EMSCRIPTEN__
     glEnable(GL_PROGRAM_POINT_SIZE);
+    glEnable(GL_MULTISAMPLE);
 #endif
 
     mat_identity(g_mv_stack[0]);
@@ -1494,8 +1498,8 @@ static int pick_box(int mx, int my_top) {
 /* All using (x-from-left, y-from-top) pixel coords. */
 
 /* Slider track. */
-static int slider_x0(void) { return SIDEBAR_W + 80; }
-static int slider_x1(void) { return win_w - 40; }
+static int slider_x0(void) { return 60; }
+static int slider_x1(void) { return win_w - 20; }
 static int slider_y (void) { return SLIDER_H / 2; }
 
 /* --- LHS sidebar: two vertical sliders controlling box motion_angle. */
@@ -1631,12 +1635,6 @@ static void draw_sidebar(void) {
     /* Right-edge separator. */
     fill_rect_2d(SIDEBAR_W - 1, side_y0, 1, side_h, 0.28f, 0.28f, 0.34f, 1.0f);
 
-    /* Title. */
-    glColor3f(0.85f, 0.85f, 0.92f);
-    gl_text_2d(8, SLIDER_H + 16, "motion");
-    glColor3f(0.60f, 0.60f, 0.66f);
-    gl_text_2d(8, SLIDER_H + 30, "angle");
-
     for (int idx = 0; idx < 2; idx++) {
         int tx  = rot_track_x(idx);
         int top = rot_track_y_top();
@@ -1673,9 +1671,6 @@ static void draw_sidebar(void) {
         gl_text_2d(tx - 12, bot + 18, buf);
     }
 
-    /* Bottom hint. */
-    glColor3f(0.55f, 0.55f, 0.62f);
-    gl_text_2d(4, win_h - PLOT_H - 6, "rad");
 }
 
 static void draw_plot(void) {
@@ -2593,6 +2588,8 @@ int main(int argc, char **argv) {
 #endif
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
+    SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 4);
 
     g_sdl_win = SDL_CreateWindow(
         "Edge-Edge Motion  |  Signed Separation",
