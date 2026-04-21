@@ -26,219 +26,659 @@
  *   R              Reset scene
  *   Escape         Quit
  *
- * Build (MSVC)
- *   cl gauss_map_viz.c opengl32.lib glu32.lib gdi32.lib user32.lib
- *
- * Build (MinGW-w64)
- *   gcc gauss_map_viz.c -o gauss_map_viz.exe -lopengl32 -lglu32 -lgdi32 -luser32 -mwindows
+ * Build
+ *   Desktop (Win32/macOS/Linux):  cmake ... && cmake --build .
+ *   Web (Emscripten via emsdk):   web.cmd    (or emcmake cmake ...)
  */
 
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef __EMSCRIPTEN__
   #include <emscripten.h>
-  #include <GLFW/glfw3.h>
-  #include <GL/gl.h>
+  #include <SDL.h>
+  #include <GLES3/gl3.h>
 #else
-  #define WIN32_LEAN_AND_MEAN
-  #include <windows.h>
-  #include <GL/gl.h>
-  #include <GL/glu.h>
-  #ifdef _MSC_VER
-    #pragma comment(lib, "opengl32.lib")
-    #pragma comment(lib, "glu32.lib")
-    #pragma comment(lib, "gdi32.lib")
-    #pragma comment(lib, "user32.lib")
-  #endif
+  #include <SDL.h>
+  #include <SDL_opengl.h>   /* brings in basic types + GL 1.1 symbols */
+#endif
+
+#include "vendor/stb_easy_font.h"
+
+/* GLdouble isn't in GLES3 / GL 3.3 core; define for legacy code paths. */
+#ifndef GLdouble
+  typedef double GLdouble;
 #endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
+static int win_w = 1200, win_h = 820;
+
 /* =================================================================
- *  Platform wrapping API
- *    - Event handlers: on_resize / on_mouse_down / on_mouse_up
- *      / on_mouse_move / on_mouse_wheel / on_key_down  (shared)
- *    - Swap:           plat_swap()                     (shared call)
- *    - Invalidate:     PLAT_INVALIDATE()               (macro)
- *  Everything else (windowing + main loop) is inside the
- *  platform-specific block at the very end of this file.
+ *  Legacy fixed-function enum shims.  ES3 / GL 3.3 core headers do
+ *  not define these, but we still use them as sentinel values in
+ *  the viz_* wrappers below (and in the app code that calls them).
  * ================================================================= */
+
+#ifndef GL_QUADS
+  #define GL_QUADS              0x0007
+  #define GL_QUAD_STRIP         0x0008
+  #define GL_POLYGON            0x0009
+#endif
+#ifndef GL_PROJECTION
+  #define GL_MODELVIEW          0x1700
+  #define GL_PROJECTION         0x1701
+#endif
+#ifndef GL_MODELVIEW_MATRIX
+  #define GL_MODELVIEW_MATRIX   0x0BA6
+  #define GL_PROJECTION_MATRIX  0x0BA7
+#endif
+#ifndef GL_LIGHTING
+  #define GL_LIGHTING           0x0B50
+  #define GL_LIGHT0             0x4000
+#endif
+#ifndef GL_LINE_SMOOTH
+  #define GL_LINE_SMOOTH        0x0B20
+  #define GL_POINT_SMOOTH       0x0B10
+  #define GL_LINE_STIPPLE       0x0B24
+  #define GL_LINE_SMOOTH_HINT   0x0C52
+#endif
+#ifndef GL_POSITION
+  #define GL_POSITION           0x1203
+  #define GL_AMBIENT            0x1200
+  #define GL_DIFFUSE            0x1201
+  #define GL_SPECULAR           0x1202
+  #define GL_SHININESS          0x1601
+  #define GL_FRONT              0x0404
+#endif
+
+/* =================================================================
+ *  GL 3.3+ function pointer loader (desktop only).
+ *  On web, <GLES3/gl3.h> provides these directly.
+ * ================================================================= */
+
+#ifndef __EMSCRIPTEN__
+
+typedef char     GLchar_;
+typedef ptrdiff_t GLsizeiptr_;
+typedef ptrdiff_t GLintptr_;
+
+#ifndef APIENTRY
+  #if defined(_WIN32)
+    #define APIENTRY __stdcall
+  #else
+    #define APIENTRY
+  #endif
+#endif
+
+#define GLFUNCS \
+    X(GLuint, CreateShader, (GLenum t), (t)) \
+    X(void,   ShaderSource, (GLuint s, GLsizei n, const GLchar_ * const *p, const GLint *l), (s,n,p,l)) \
+    X(void,   CompileShader,(GLuint s), (s)) \
+    X(void,   GetShaderiv,  (GLuint s, GLenum p, GLint *v), (s,p,v)) \
+    X(void,   GetShaderInfoLog,(GLuint s, GLsizei b, GLsizei *l, GLchar_ *i), (s,b,l,i)) \
+    X(void,   DeleteShader, (GLuint s), (s)) \
+    X(GLuint, CreateProgram,(void), ()) \
+    X(void,   AttachShader, (GLuint p, GLuint s), (p,s)) \
+    X(void,   LinkProgram,  (GLuint p), (p)) \
+    X(void,   GetProgramiv, (GLuint p, GLenum n, GLint *v), (p,n,v)) \
+    X(void,   GetProgramInfoLog,(GLuint p, GLsizei b, GLsizei *l, GLchar_ *i), (p,b,l,i)) \
+    X(void,   UseProgram,   (GLuint p), (p)) \
+    X(GLint,  GetUniformLocation,(GLuint p, const GLchar_ *n), (p,n)) \
+    X(void,   UniformMatrix4fv,(GLint l, GLsizei c, GLboolean t, const GLfloat *v), (l,c,t,v)) \
+    X(void,   Uniform1f,    (GLint l, GLfloat v), (l,v)) \
+    X(void,   GenVertexArrays,(GLsizei n, GLuint *a), (n,a)) \
+    X(void,   BindVertexArray,(GLuint a), (a)) \
+    X(void,   GenBuffers,   (GLsizei n, GLuint *b), (n,b)) \
+    X(void,   BindBuffer,   (GLenum t, GLuint b), (t,b)) \
+    X(void,   BufferData,   (GLenum t, GLsizeiptr_ s, const void *d, GLenum u), (t,s,d,u)) \
+    X(void,   BufferSubData,(GLenum t, GLintptr_ o, GLsizeiptr_ s, const void *d), (t,o,s,d)) \
+    X(void,   VertexAttribPointer,(GLuint i, GLint s, GLenum t, GLboolean n, GLsizei st, const void *p), (i,s,t,n,st,p)) \
+    X(void,   EnableVertexAttribArray,(GLuint i), (i))
+
+#define X(ret, name, params, args) typedef ret (APIENTRY *PFN_gl_##name) params; static PFN_gl_##name gl_##name;
+GLFUNCS
+#undef X
+
+static void viz_load_gl_funcs(void) {
+#define X(ret, name, params, args) gl_##name = (PFN_gl_##name)SDL_GL_GetProcAddress("gl" #name);
+    GLFUNCS
+#undef X
+}
+
+/* Redirect the modern names we use below to the loaded function
+   pointers, so the code reads identically on both platforms. */
+#define glCreateShader          gl_CreateShader
+#define glShaderSource          gl_ShaderSource
+#define glCompileShader         gl_CompileShader
+#define glGetShaderiv           gl_GetShaderiv
+#define glGetShaderInfoLog      gl_GetShaderInfoLog
+#define glDeleteShader          gl_DeleteShader
+#define glCreateProgram         gl_CreateProgram
+#define glAttachShader          gl_AttachShader
+#define glLinkProgram           gl_LinkProgram
+#define glGetProgramiv          gl_GetProgramiv
+#define glGetProgramInfoLog     gl_GetProgramInfoLog
+#define glUseProgram            gl_UseProgram
+#define glGetUniformLocation    gl_GetUniformLocation
+#define glUniformMatrix4fv      gl_UniformMatrix4fv
+#define glUniform1f             gl_Uniform1f
+#define glGenVertexArrays       gl_GenVertexArrays
+#define glBindVertexArray       gl_BindVertexArray
+#define glGenBuffers            gl_GenBuffers
+#define glBindBuffer            gl_BindBuffer
+#define glBufferData            gl_BufferData
+#define glBufferSubData         gl_BufferSubData
+#define glVertexAttribPointer   gl_VertexAttribPointer
+#define glEnableVertexAttribArray gl_EnableVertexAttribArray
+
+#ifndef GL_ARRAY_BUFFER
+  #define GL_ARRAY_BUFFER       0x8892
+#endif
+#ifndef GL_DYNAMIC_DRAW
+  #define GL_DYNAMIC_DRAW       0x88E8
+#endif
+#ifndef GL_VERTEX_SHADER
+  #define GL_VERTEX_SHADER      0x8B31
+  #define GL_FRAGMENT_SHADER    0x8B30
+#endif
+#ifndef GL_COMPILE_STATUS
+  #define GL_COMPILE_STATUS     0x8B81
+  #define GL_LINK_STATUS        0x8B82
+  #define GL_INFO_LOG_LENGTH    0x8B84
+#endif
+#ifndef GL_PROGRAM_POINT_SIZE
+  #define GL_PROGRAM_POINT_SIZE 0x8642
+#endif
+
+#else  /* __EMSCRIPTEN__ */
+static void viz_load_gl_funcs(void) {}
+#endif
+
+/* =================================================================
+ *  Matrix stack (replaces fixed-function glMatrixMode/glLoadIdentity
+ *  /glPushMatrix/glPopMatrix/glMultMatrixf/glOrtho/gluPerspective/
+ *  gluLookAt).  Column-major, like GL.
+ * ================================================================= */
+
+typedef float Mat4[16];
+
+#define MAT_STACK_DEPTH 32
+static Mat4 g_mv_stack[MAT_STACK_DEPTH];
+static Mat4 g_pj_stack[MAT_STACK_DEPTH];
+static int  g_mv_top = 0;
+static int  g_pj_top = 0;
+static int  g_mat_mode = GL_MODELVIEW;
+static int  g_viewport[4] = { 0, 0, 1200, 820 };
+
+static void mat_identity(Mat4 m) {
+    memset(m, 0, sizeof(Mat4));
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+}
+static void mat_copy(Mat4 dst, const Mat4 src) { memcpy(dst, src, sizeof(Mat4)); }
+static void mat_mul(Mat4 out, const Mat4 a, const Mat4 b) {
+    Mat4 r;
+    for (int c = 0; c < 4; c++)
+        for (int rw = 0; rw < 4; rw++)
+            r[rw + c*4] =
+                a[rw     ] * b[c*4    ] +
+                a[rw +  4] * b[c*4 + 1] +
+                a[rw +  8] * b[c*4 + 2] +
+                a[rw + 12] * b[c*4 + 3];
+    memcpy(out, r, sizeof(Mat4));
+}
+
+static float *mat_cur(void) {
+    return (g_mat_mode == GL_PROJECTION) ? g_pj_stack[g_pj_top] : g_mv_stack[g_mv_top];
+}
+
+static void viz_matrix_mode(GLenum m)  { g_mat_mode = m; }
+static void viz_load_identity(void)    { mat_identity(mat_cur()); }
+static void viz_push_matrix(void) {
+    if (g_mat_mode == GL_PROJECTION) {
+        if (g_pj_top < MAT_STACK_DEPTH - 1) {
+            mat_copy(g_pj_stack[g_pj_top + 1], g_pj_stack[g_pj_top]); g_pj_top++;
+        }
+    } else {
+        if (g_mv_top < MAT_STACK_DEPTH - 1) {
+            mat_copy(g_mv_stack[g_mv_top + 1], g_mv_stack[g_mv_top]); g_mv_top++;
+        }
+    }
+}
+static void viz_pop_matrix(void) {
+    if (g_mat_mode == GL_PROJECTION) { if (g_pj_top > 0) g_pj_top--; }
+    else                             { if (g_mv_top > 0) g_mv_top--; }
+}
+static void viz_mult_matrixf(const float *m) {
+    Mat4 r, c;  mat_copy(c, mat_cur());  mat_mul(r, c, m);  mat_copy(mat_cur(), r);
+}
+static void viz_ortho(double l, double r, double b, double t, double zn, double zf) {
+    Mat4 m = {0};
+    m[0]  = (float)( 2.0 / (r - l));
+    m[5]  = (float)( 2.0 / (t - b));
+    m[10] = (float)(-2.0 / (zf - zn));
+    m[12] = (float)(-(r + l) / (r - l));
+    m[13] = (float)(-(t + b) / (t - b));
+    m[14] = (float)(-(zf + zn) / (zf - zn));
+    m[15] = 1.0f;
+    viz_mult_matrixf(m);
+}
+static void viz_perspective(double fovy_deg, double aspect, double zn, double zf) {
+    double f = 1.0 / tan(fovy_deg * 0.5 * M_PI / 180.0);
+    Mat4 m = {0};
+    m[0]  = (float)(f / aspect);
+    m[5]  = (float) f;
+    m[10] = (float)((zf + zn) / (zn - zf));
+    m[11] = -1.0f;
+    m[14] = (float)((2.0 * zf * zn) / (zn - zf));
+    viz_mult_matrixf(m);
+}
+static void viz_lookat(double ex, double ey, double ez,
+                       double cx, double cy, double cz,
+                       double ux, double uy, double uz) {
+    double fx = cx-ex, fy = cy-ey, fz = cz-ez;
+    double fl = sqrt(fx*fx + fy*fy + fz*fz);  fx/=fl; fy/=fl; fz/=fl;
+    double sx = fy*uz - fz*uy, sy = fz*ux - fx*uz, sz = fx*uy - fy*ux;
+    double sl = sqrt(sx*sx + sy*sy + sz*sz);  sx/=sl; sy/=sl; sz/=sl;
+    double upx = sy*fz - sz*fy, upy = sz*fx - sx*fz, upz = sx*fy - sy*fx;
+    Mat4 m = {
+        (float)sx, (float)upx, (float)-fx, 0,
+        (float)sy, (float)upy, (float)-fy, 0,
+        (float)sz, (float)upz, (float)-fz, 0,
+        0,         0,          0,          1
+    };
+    viz_mult_matrixf(m);
+    Mat4 t = { 1,0,0,0,  0,1,0,0,  0,0,1,0,  (float)-ex, (float)-ey, (float)-ez, 1 };
+    viz_mult_matrixf(t);
+}
+
+static void viz_get_doublev(GLenum e, double *out) {
+    const float *src = NULL;
+    if      (e == GL_MODELVIEW_MATRIX)  src = g_mv_stack[g_mv_top];
+    else if (e == GL_PROJECTION_MATRIX) src = g_pj_stack[g_pj_top];
+    else return;
+    for (int i = 0; i < 16; i++) out[i] = (double)src[i];
+}
+
+/* Project / unproject using the tracked matrices + g_viewport. */
+static void mat_mul_v4(const Mat4 m, const double v[4], double r[4]) {
+    for (int i = 0; i < 4; i++)
+        r[i] = (double)m[i]*v[0] + (double)m[i+4]*v[1] + (double)m[i+8]*v[2] + (double)m[i+12]*v[3];
+}
+static int  mat_mul_dd(const double a[16], const double b[16], double r[16]) {
+    double o[16];
+    for (int c = 0; c < 4; c++)
+        for (int rw = 0; rw < 4; rw++)
+            o[rw + c*4] = a[rw]*b[c*4] + a[rw+4]*b[c*4+1] + a[rw+8]*b[c*4+2] + a[rw+12]*b[c*4+3];
+    memcpy(r, o, sizeof o);
+    return 1;
+}
+static int mat_invert_d(const double m[16], double inv[16]) {
+    inv[0]=m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+    inv[4]=-m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+    inv[8]=m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+    inv[12]=-m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+    inv[1]=-m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+    inv[5]=m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+    inv[9]=-m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+    inv[13]=m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+    inv[2]=m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+    inv[6]=-m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+    inv[10]=m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+    inv[14]=-m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+    inv[3]=-m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+    inv[7]=m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+    inv[11]=-m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+    inv[15]=m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+    double det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
+    if (det == 0) return 0;
+    det = 1.0 / det;
+    for (int i = 0; i < 16; i++) inv[i] *= det;
+    return 1;
+}
+
+static int viz_project(double ox, double oy, double oz,
+                       const double mv[16], const double pj[16], const int vp[4],
+                       double *wx, double *wy, double *wz) {
+    Mat4 mvf, pjf;
+    for (int i = 0; i < 16; i++) { mvf[i] = (float)mv[i]; pjf[i] = (float)pj[i]; }
+    double v[4] = {ox, oy, oz, 1.0}, t[4], c[4];
+    mat_mul_v4(mvf, v, t);
+    mat_mul_v4(pjf, t, c);
+    if (c[3] == 0) return 0;
+    c[0]/=c[3]; c[1]/=c[3]; c[2]/=c[3];
+    *wx = vp[0] + (c[0]*0.5 + 0.5) * vp[2];
+    *wy = vp[1] + (c[1]*0.5 + 0.5) * vp[3];
+    *wz = c[2]*0.5 + 0.5;
+    return 1;
+}
+
+static int viz_unproject(double wx, double wy, double wz,
+                         const double mv[16], const double pj[16], const int vp[4],
+                         double *ox, double *oy, double *oz) {
+    double mvp[16], inv[16];
+    mat_mul_dd(pj, mv, mvp);
+    if (!mat_invert_d(mvp, inv)) return 0;
+    double v[4] = {
+        (wx - vp[0]) / vp[2] * 2.0 - 1.0,
+        (wy - vp[1]) / vp[3] * 2.0 - 1.0,
+        wz * 2.0 - 1.0,
+        1.0
+    };
+    double r[4];
+    {   double tmp[4];
+        for (int i = 0; i < 4; i++)
+            tmp[i] = inv[i]*v[0] + inv[i+4]*v[1] + inv[i+8]*v[2] + inv[i+12]*v[3];
+        memcpy(r, tmp, sizeof r);
+    }
+    if (r[3] == 0) return 0;
+    *ox = r[0]/r[3]; *oy = r[1]/r[3]; *oz = r[2]/r[3];
+    return 1;
+}
+
+/* =================================================================
+ *  Immediate-mode batcher.  Accumulates vertices between
+ *  viz_begin() / viz_end() then draws with a single shader.
+ * ================================================================= */
+
+typedef struct { float x, y, z, r, g, b, a; } ImmVert;
+
+#define IMM_MAX_VERTS 262144
+static ImmVert g_verts[IMM_MAX_VERTS];
+static int     g_nvert = 0;
+static GLenum  g_imm_mode = 0;
+static float   g_cur_r = 1, g_cur_g = 1, g_cur_b = 1, g_cur_a = 1;
+static float   g_line_width = 1.0f;
+static float   g_point_size = 1.0f;
+
+static GLuint  g_prog = 0;
+static GLint   g_uni_mvp = -1, g_uni_pointsize = -1;
+static GLuint  g_vao = 0, g_vbo = 0;
+
+static GLuint viz_compile(GLenum type, const char *src) {
+    GLuint s = glCreateShader(type);
+    glShaderSource(s, 1, &src, NULL);
+    glCompileShader(s);
+    GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[2048]; GLsizei n = 0;
+        glGetShaderInfoLog(s, sizeof log, &n, log);
+        fprintf(stderr, "shader compile error:\n%s\n", log);
+    }
+    return s;
+}
+
+static void viz_init_gl(void) {
+    static const char *vert_src =
+#ifdef __EMSCRIPTEN__
+        "#version 300 es\n"
+        "precision highp float;\n"
+#else
+        "#version 330 core\n"
+#endif
+        "layout(location=0) in vec3 a_pos;\n"
+        "layout(location=1) in vec4 a_col;\n"
+        "uniform mat4 u_mvp;\n"
+        "uniform float u_pointsize;\n"
+        "out vec4 v_col;\n"
+        "void main() {\n"
+        "  gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
+        "  gl_PointSize = u_pointsize;\n"
+        "  v_col = a_col;\n"
+        "}\n";
+    static const char *frag_src =
+#ifdef __EMSCRIPTEN__
+        "#version 300 es\n"
+        "precision highp float;\n"
+#else
+        "#version 330 core\n"
+#endif
+        "in vec4 v_col;\n"
+        "out vec4 o_col;\n"
+        "void main() { o_col = v_col; }\n";
+
+    GLuint vs = viz_compile(GL_VERTEX_SHADER, vert_src);
+    GLuint fs = viz_compile(GL_FRAGMENT_SHADER, frag_src);
+    g_prog = glCreateProgram();
+    glAttachShader(g_prog, vs);
+    glAttachShader(g_prog, fs);
+    glLinkProgram(g_prog);
+    GLint ok = 0; glGetProgramiv(g_prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[2048]; GLsizei n = 0;
+        glGetProgramInfoLog(g_prog, sizeof log, &n, log);
+        fprintf(stderr, "program link error:\n%s\n", log);
+    }
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    g_uni_mvp       = glGetUniformLocation(g_prog, "u_mvp");
+    g_uni_pointsize = glGetUniformLocation(g_prog, "u_pointsize");
+
+    glGenVertexArrays(1, &g_vao);
+    glBindVertexArray(g_vao);
+    glGenBuffers(1, &g_vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof g_verts, NULL, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(0);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(ImmVert), (void*)0);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(ImmVert), (void*)(3 * sizeof(float)));
+
+#ifndef __EMSCRIPTEN__
+    glEnable(GL_PROGRAM_POINT_SIZE);
+#endif
+
+    mat_identity(g_mv_stack[0]);
+    mat_identity(g_pj_stack[0]);
+}
+
+static void viz_flush(GLenum mode, int nv) {
+    if (nv == 0 || !g_prog) return;
+    Mat4 mvp;  mat_mul(mvp, g_pj_stack[g_pj_top], g_mv_stack[g_mv_top]);
+    glUseProgram(g_prog);
+    glUniformMatrix4fv(g_uni_mvp, 1, GL_FALSE, mvp);
+    glUniform1f(g_uni_pointsize, g_point_size);
+    glBindVertexArray(g_vao);
+    glBindBuffer(GL_ARRAY_BUFFER, g_vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, (GLsizeiptr)(nv * sizeof(ImmVert)), g_verts);
+    glLineWidth(g_line_width);
+    glDrawArrays(mode, 0, nv);
+}
+
+static void viz_begin(GLenum mode) { g_imm_mode = mode; g_nvert = 0; }
+static void viz_color3f(float r, float g, float b) { g_cur_r=r; g_cur_g=g; g_cur_b=b; g_cur_a=1; }
+static void viz_color4f(float r, float g, float b, float a) { g_cur_r=r; g_cur_g=g; g_cur_b=b; g_cur_a=a; }
+static void viz_vertex3f(float x, float y, float z) {
+    if (g_nvert >= IMM_MAX_VERTS) return;
+    ImmVert *v = &g_verts[g_nvert++];
+    v->x = x; v->y = y; v->z = z;
+    v->r = g_cur_r; v->g = g_cur_g; v->b = g_cur_b; v->a = g_cur_a;
+}
+static void viz_vertex2f(float x, float y) { viz_vertex3f(x, y, 0.0f); }
+
+static void viz_end(void) {
+    int n = g_nvert;
+    GLenum mode = g_imm_mode;
+    if (mode == GL_QUADS) {
+        int q = n / 4;
+        if (q == 0) return;
+        /* expand 0,1,2,3 -> 0,1,2, 0,2,3 */
+        static ImmVert tmp[IMM_MAX_VERTS];
+        int out = 0;
+        for (int i = 0; i < q; i++) {
+            int b = i * 4;
+            tmp[out++] = g_verts[b+0];
+            tmp[out++] = g_verts[b+1];
+            tmp[out++] = g_verts[b+2];
+            tmp[out++] = g_verts[b+0];
+            tmp[out++] = g_verts[b+2];
+            tmp[out++] = g_verts[b+3];
+        }
+        memcpy(g_verts, tmp, out * sizeof(ImmVert));
+        viz_flush(GL_TRIANGLES, out);
+    } else if (mode == GL_QUAD_STRIP) {
+        viz_flush(GL_TRIANGLE_STRIP, n);
+    } else if (mode == GL_POLYGON) {
+        viz_flush(GL_TRIANGLE_FAN, n);
+    } else {
+        viz_flush(mode, n);
+    }
+    g_nvert = 0;
+}
+
+static void viz_line_width(float w) { g_line_width = w > 0 ? w : 1.0f; }
+static void viz_point_size(float s) { g_point_size = s > 0 ? s : 1.0f; }
+
+/* enable / disable with a filter for the legacy fixed-function caps. */
+static void viz_enable(GLenum cap) {
+    switch (cap) {
+    case GL_LIGHTING: case GL_LIGHT0:
+    case GL_LINE_SMOOTH: case GL_POINT_SMOOTH: case GL_LINE_STIPPLE:
+        return;
+    default: glEnable(cap);
+    }
+}
+static void viz_disable(GLenum cap) {
+    switch (cap) {
+    case GL_LIGHTING: case GL_LIGHT0:
+    case GL_LINE_SMOOTH: case GL_POINT_SMOOTH: case GL_LINE_STIPPLE:
+        return;
+    default: glDisable(cap);
+    }
+}
+
+/* Viewport wrapper tracks the current viewport so gluProject/UnProject
+   and 2-D text rendering can read it without calling back into GL. */
+static void viz_viewport(int x, int y, int w, int h) {
+    g_viewport[0] = x; g_viewport[1] = y; g_viewport[2] = w; g_viewport[3] = h;
+    glViewport(x, y, w, h);
+}
+
+/* =================================================================
+ *  gluSphere replacement (triangle strips).  Old code called this
+ *  through the GLU quadric API; we keep the signatures via macros.
+ * ================================================================= */
+typedef int GLUquadric;
+#ifndef GLU_FILL
+  #define GLU_FILL    0
+  #define GLU_SMOOTH  0
+#endif
+static GLUquadric *viz_new_quadric(void) { static int q; return &q; }
+static void viz_sphere(GLUquadric *q, double r, int slices, int stacks) {
+    (void)q;
+    for (int i = 0; i < stacks; i++) {
+        double p0 = M_PI * ((double)i       / stacks - 0.5);
+        double p1 = M_PI * ((double)(i + 1) / stacks - 0.5);
+        double cp0 = cos(p0), sp0 = sin(p0);
+        double cp1 = cos(p1), sp1 = sin(p1);
+        viz_begin(GL_TRIANGLE_STRIP);
+        for (int j = 0; j <= slices; j++) {
+            double th = 2.0 * M_PI * j / slices;
+            double ct = cos(th), st = sin(th);
+            viz_vertex3f((float)(r*cp1*ct), (float)(r*sp1), (float)(r*cp1*st));
+            viz_vertex3f((float)(r*cp0*ct), (float)(r*sp0), (float)(r*cp0*st));
+        }
+        viz_end();
+    }
+}
+
+/* =================================================================
+ *  Text rendering via stb_easy_font.  Converts stb's quads into
+ *  triangles fed through viz_* (so text obeys the current MVP).
+ * ================================================================= */
+
+static void viz_text_2d_px(int x_from_left, int y_from_top, const char *s) {
+    static char buf[99999];
+    int nq = stb_easy_font_print((float)x_from_left, (float)y_from_top,
+                                 (char*)s, NULL, buf, (int)sizeof buf);
+    /* stb emits quads: 4 verts each, 16 bytes per vert
+       (float x,y,z then uchar[4] color).  y grows downwards. */
+    const char *p = buf;
+    viz_begin(GL_QUADS);
+    for (int i = 0; i < nq; i++) {
+        for (int v = 0; v < 4; v++) {
+            float qx, qy, qz;
+            memcpy(&qx, p + 0, 4);
+            memcpy(&qy, p + 4, 4);
+            memcpy(&qz, p + 8, 4);
+            p += 16;
+            viz_vertex3f(qx, (float)win_h - qy, qz);  /* flip y */
+        }
+    }
+    viz_end();
+}
+
+static void gl_text_2d(int x, int y_from_top, const char *s) {
+    viz_text_2d_px(x, y_from_top, s);
+}
+
+static void gl_text_3d_xyz(float wx, float wy, float wz, const char *s);
+/* Forward -- defined below once Vec3 is available. */
+
+/* =================================================================
+ *  Macro redirection -- keep the app code identical to the old
+ *  fixed-function GL by routing legacy calls to viz_* wrappers.
+ * ================================================================= */
+
+#define glBegin(m)              viz_begin(m)
+#define glEnd()                 viz_end()
+#define glVertex3f(x,y,z)       viz_vertex3f((float)(x),(float)(y),(float)(z))
+#define glVertex3d(x,y,z)       viz_vertex3f((float)(x),(float)(y),(float)(z))
+#define glVertex2f(x,y)         viz_vertex2f((float)(x),(float)(y))
+#define glVertex2i(x,y)         viz_vertex2f((float)(x),(float)(y))
+#define glColor3f(r,g,b)        viz_color3f((float)(r),(float)(g),(float)(b))
+#define glColor4f(r,g,b,a)      viz_color4f((float)(r),(float)(g),(float)(b),(float)(a))
+#define glNormal3f(x,y,z)       ((void)0)
+#define glNormal3d(x,y,z)       ((void)0)
+#define glMatrixMode(m)         viz_matrix_mode(m)
+#define glLoadIdentity()        viz_load_identity()
+#define glPushMatrix()          viz_push_matrix()
+#define glPopMatrix()           viz_pop_matrix()
+#define glMultMatrixf(m)        viz_mult_matrixf(m)
+#define glOrtho(l,r,b,t,zn,zf)  viz_ortho((double)(l),(double)(r),(double)(b),(double)(t),(double)(zn),(double)(zf))
+#define glEnable(c)             viz_enable(c)
+#define glDisable(c)            viz_disable(c)
+#define glLightfv(a,b,c)        ((void)0)
+#define glMaterialfv(a,b,c)     ((void)0)
+#define glMaterialf(a,b,c)      ((void)0)
+#define glHint(a,b)             ((void)0)
+#define glGetDoublev(e,p)       viz_get_doublev((e),(p))
+#define glViewport(x,y,w,h)     viz_viewport((x),(y),(w),(h))
+#define glLineWidth(w)          viz_line_width((float)(w))
+#define glPointSize(s)          viz_point_size((float)(s))
+
+/* Viewport read through glGetIntegerv.  Only used for GL_VIEWPORT
+   in this codebase -- forward to tracked state. */
+static void viz_get_viewport_ints(int *p) {
+    p[0] = g_viewport[0]; p[1] = g_viewport[1];
+    p[2] = g_viewport[2]; p[3] = g_viewport[3];
+}
+#define glGetIntegerv(e,p)      do { if ((e) == 0x0BA2 /*GL_VIEWPORT*/) viz_get_viewport_ints((p)); } while (0)
+
+#define gluPerspective(f,a,n,x) viz_perspective((double)(f),(double)(a),(double)(n),(double)(x))
+#define gluLookAt(ex,ey,ez,cx,cy,cz,ux,uy,uz) viz_lookat((double)(ex),(double)(ey),(double)(ez),(double)(cx),(double)(cy),(double)(cz),(double)(ux),(double)(uy),(double)(uz))
+#define gluProject(a,b,c,mv,pj,vp,x,y,z)   viz_project((double)(a),(double)(b),(double)(c),(mv),(pj),(vp),(x),(y),(z))
+#define gluUnProject(a,b,c,mv,pj,vp,x,y,z) viz_unproject((double)(a),(double)(b),(double)(c),(mv),(pj),(vp),(x),(y),(z))
+#define gluSphere(q,r,sl,st)    viz_sphere((q),(double)(r),(sl),(st))
+#define gluNewQuadric()         viz_new_quadric()
+#define gluQuadricDrawStyle(q,s) ((void)0)
+#define gluQuadricNormals(q,m)  ((void)0)
+
+/* PLAT_INVALIDATE is a no-op now (we render every frame). */
+#define PLAT_INVALIDATE()       ((void)0)
 
 enum { KEY_ESCAPE = 1, KEY_R = 2, KEY_LEFT = 3, KEY_RIGHT = 4 };
 
-#ifdef __EMSCRIPTEN__
-  static GLFWwindow *g_window = NULL;
-  #define PLAT_INVALIDATE() ((void)0)
+static int g_should_quit = 0;
 
-  /* WebGL (even with LEGACY_GL_EMULATION) is missing a few legacy entry
-     points.  Provide shims so the rest of the file compiles unchanged.  */
-
-  static void emu_glGetDoublev(GLenum e, double *out) {
-      float tmp[16];
-      glGetFloatv(e, tmp);
-      for (int i = 0; i < 16; i++) out[i] = (double)tmp[i];
-  }
-  #define glGetDoublev(e, p)  emu_glGetDoublev((e), (p))
-  #define glNormal3d(x, y, z) glNormal3f((float)(x), (float)(y), (float)(z))
-  #define glVertex3d(x, y, z) glVertex3f((float)(x), (float)(y), (float)(z))
-
-  static inline void emu_glMaterialf(GLenum face, GLenum pname, float v) {
-      float a[1] = { v };
-      glMaterialfv(face, pname, a);
-  }
-  #define glMaterialf(f, p, v) emu_glMaterialf((f), (p), (v))
-
-  /* --- Minimal inline GLU replacements (WebGL has no glu). --------- */
-
-  static void gluPerspective(double fovy, double aspect, double zn, double zf) {
-      double f = 1.0 / tan(fovy * 0.5 * M_PI / 180.0);
-      float m[16] = {
-          (float)(f/aspect), 0, 0, 0,
-          0, (float)f, 0, 0,
-          0, 0, (float)((zf+zn)/(zn-zf)), -1.0f,
-          0, 0, (float)((2.0*zf*zn)/(zn-zf)), 0
-      };
-      glMultMatrixf(m);
-  }
-
-  static void gluLookAt(double ex, double ey, double ez,
-                        double cx, double cy, double cz,
-                        double ux, double uy, double uz) {
-      double fx = cx-ex, fy = cy-ey, fz = cz-ez;
-      double fl = sqrt(fx*fx + fy*fy + fz*fz);
-      fx/=fl; fy/=fl; fz/=fl;
-      double sx = fy*uz - fz*uy, sy = fz*ux - fx*uz, sz = fx*uy - fy*ux;
-      double sl = sqrt(sx*sx + sy*sy + sz*sz);
-      sx/=sl; sy/=sl; sz/=sl;
-      double upx = sy*fz - sz*fy, upy = sz*fx - sx*fz, upz = sx*fy - sy*fx;
-      float m[16] = {
-          (float)sx, (float)upx, (float)-fx, 0,
-          (float)sy, (float)upy, (float)-fy, 0,
-          (float)sz, (float)upz, (float)-fz, 0,
-          0,         0,          0,          1
-      };
-      glMultMatrixf(m);
-      glTranslatef((float)-ex, (float)-ey, (float)-ez);
-  }
-
-  static void pm_mul_v4(const double m[16], const double v[4], double r[4]) {
-      for (int i = 0; i < 4; i++)
-          r[i] = m[i]*v[0] + m[i+4]*v[1] + m[i+8]*v[2] + m[i+12]*v[3];
-  }
-
-  static void pm_mul(const double a[16], const double b[16], double r[16]) {
-      for (int c = 0; c < 4; c++)
-          for (int ro = 0; ro < 4; ro++) {
-              double s = 0;
-              for (int k = 0; k < 4; k++) s += a[ro + k*4] * b[k + c*4];
-              r[ro + c*4] = s;
-          }
-  }
-
-  static int pm_invert(const double m[16], double inv[16]) {
-      inv[0]=m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
-      inv[4]=-m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
-      inv[8]=m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
-      inv[12]=-m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
-      inv[1]=-m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
-      inv[5]=m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
-      inv[9]=-m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
-      inv[13]=m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
-      inv[2]=m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
-      inv[6]=-m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
-      inv[10]=m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
-      inv[14]=-m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
-      inv[3]=-m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
-      inv[7]=m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
-      inv[11]=-m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
-      inv[15]=m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
-      double det = m[0]*inv[0] + m[1]*inv[4] + m[2]*inv[8] + m[3]*inv[12];
-      if (det == 0) return 0;
-      det = 1.0/det;
-      for (int i = 0; i < 16; i++) inv[i] *= det;
-      return 1;
-  }
-
-  static int gluProject(double ox, double oy, double oz,
-                        const double mv[16], const double pj[16], const int vp[4],
-                        double *wx, double *wy, double *wz) {
-      double v[4] = {ox, oy, oz, 1.0}, t[4], c[4];
-      pm_mul_v4(mv, v, t);
-      pm_mul_v4(pj, t, c);
-      if (c[3] == 0) return 0;
-      c[0]/=c[3]; c[1]/=c[3]; c[2]/=c[3];
-      *wx = vp[0] + (c[0]*0.5 + 0.5) * vp[2];
-      *wy = vp[1] + (c[1]*0.5 + 0.5) * vp[3];
-      *wz = c[2]*0.5 + 0.5;
-      return 1;
-  }
-
-  static int gluUnProject(double wx, double wy, double wz,
-                          const double mv[16], const double pj[16], const int vp[4],
-                          double *ox, double *oy, double *oz) {
-      double mvp[16], inv[16];
-      pm_mul(pj, mv, mvp);
-      if (!pm_invert(mvp, inv)) return 0;
-      double v[4] = {
-          (wx - vp[0]) / vp[2] * 2.0 - 1.0,
-          (wy - vp[1]) / vp[3] * 2.0 - 1.0,
-          wz * 2.0 - 1.0,
-          1.0
-      };
-      double r[4];
-      pm_mul_v4(inv, v, r);
-      if (r[3] == 0) return 0;
-      *ox = r[0]/r[3]; *oy = r[1]/r[3]; *oz = r[2]/r[3];
-      return 1;
-  }
-
-  typedef struct { int dummy; } GLUquadric;
-  #define GLU_FILL   0
-  #define GLU_SMOOTH 0
-  static GLUquadric *gluNewQuadric(void) { static GLUquadric q; return &q; }
-  static void gluQuadricDrawStyle(GLUquadric *q, int s) { (void)q; (void)s; }
-  static void gluQuadricNormals  (GLUquadric *q, int m) { (void)q; (void)m; }
-
-  static void gluSphere(GLUquadric *q, double r, int slices, int stacks) {
-      (void)q;
-      for (int i = 0; i < stacks; i++) {
-          double p0 = M_PI * ((double)i       / stacks - 0.5);
-          double p1 = M_PI * ((double)(i + 1) / stacks - 0.5);
-          double cp0 = cos(p0), sp0 = sin(p0);
-          double cp1 = cos(p1), sp1 = sin(p1);
-          glBegin(GL_TRIANGLE_STRIP);
-          for (int j = 0; j <= slices; j++) {
-              double th = 2.0 * M_PI * j / slices;
-              double ct = cos(th), st = sin(th);
-              glNormal3d(cp1*ct, sp1, cp1*st);
-              glVertex3d(r*cp1*ct, r*sp1, r*cp1*st);
-              glNormal3d(cp0*ct, sp0, cp0*st);
-              glVertex3d(r*cp0*ct, r*sp0, r*cp0*st);
-          }
-          glEnd();
-      }
-  }
-
-#else
-  /* Desktop Win32. */
-  static HWND  g_hwnd;
-  static HDC   g_hdc;
-  static HGLRC g_hrc;
-  #define PLAT_INVALIDATE() InvalidateRect(g_hwnd, NULL, FALSE)
-#endif
-
-static void plat_swap(void) {
-#ifdef __EMSCRIPTEN__
-    if (g_window) glfwSwapBuffers(g_window);
-#else
-    SwapBuffers(g_hdc);
-#endif
-}
+/* Forward decls -- real definitions at the bottom of the file. */
+static void plat_swap(void);
 
 /* =================================================================
  *  Vec3
@@ -608,8 +1048,6 @@ static void box_edge_face_normals_world(const Box *b, float t,
  *  Application state
  * ================================================================= */
 
-static int   win_w = 1200, win_h = 820;
-
 /* UI regions. */
 #define SLIDER_H    44
 #define PLOT_H      200
@@ -644,7 +1082,6 @@ static int   mx_prev, my_prev;
 static int   box_drag_idx = -1;         /* 0 = A, 1 = B, -1 = none        */
 
 /* Bitmap font. */
-static GLuint font_base;
 
 /* =================================================================
  *  Scene setup
@@ -703,38 +1140,38 @@ static void reset_scene(void) {
  *  Font
  * ================================================================= */
 
-#ifdef __EMSCRIPTEN__
-/* Text rendering is stubbed on web -- labels won't appear, geometry still works. */
-static void init_font(void) {}
-static void gl_text_2d(int x, int y, const char *s) { (void)x; (void)y; (void)s; }
-static void gl_text_3d(Vec3 p, const char *s) { (void)p; (void)s; }
-#else
-static void init_font(void) {
-    font_base = glGenLists(128);
-    HFONT f = CreateFontA(
-        -14, 0, 0, 0, FW_BOLD, 0, 0, 0,
-        ANSI_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY, FF_DONTCARE | DEFAULT_PITCH, "Consolas");
-    HFONT old = (HFONT)SelectObject(g_hdc, f);
-    wglUseFontBitmaps(g_hdc, 0, 128, font_base);
-    SelectObject(g_hdc, old);
-    DeleteObject(f);
-}
+static void init_font(void) {}  /* stb_easy_font needs no init */
 
-/* x from left, y from top. */
-static void gl_text_2d(int x, int y, const char *s) {
-    glRasterPos2i(x, win_h - y);
-    glListBase(font_base);
-    glCallLists((GLsizei)strlen(s), GL_UNSIGNED_BYTE, (const GLubyte *)s);
-}
-
-/* Draws text at a 3-D position in the current model-view / projection. */
+/* 3-D text: project to screen, draw as 2-D quads in ortho. */
 static void gl_text_3d(Vec3 p, const char *s) {
-    glRasterPos3f(p.x, p.y, p.z);
-    glListBase(font_base);
-    glCallLists((GLsizei)strlen(s), GL_UNSIGNED_BYTE, (const GLubyte *)s);
+    double mv[16], pj[16];
+    viz_get_doublev(GL_MODELVIEW_MATRIX,  mv);
+    viz_get_doublev(GL_PROJECTION_MATRIX, pj);
+    int vp[4]; for (int i = 0; i < 4; i++) vp[i] = g_viewport[i];
+    double sx, sy, sz;
+    if (!viz_project(p.x, p.y, p.z, mv, pj, vp, &sx, &sy, &sz)) return;
+    if (sz < 0.0 || sz > 1.0) return;
+
+    /* Bracket: switch to full-window ortho, draw, restore. */
+    viz_matrix_mode(GL_PROJECTION);
+    viz_push_matrix();
+    viz_load_identity();
+    viz_ortho(0, win_w, 0, win_h, -1, 1);
+    viz_matrix_mode(GL_MODELVIEW);
+    viz_push_matrix();
+    viz_load_identity();
+    int vp_save[4] = { g_viewport[0], g_viewport[1], g_viewport[2], g_viewport[3] };
+    viz_viewport(0, 0, win_w, win_h);
+
+    int y_from_top = win_h - (int)sy;
+    gl_text_2d((int)sx, y_from_top, s);
+
+    viz_viewport(vp_save[0], vp_save[1], vp_save[2], vp_save[3]);
+    viz_matrix_mode(GL_PROJECTION);
+    viz_pop_matrix();
+    viz_matrix_mode(GL_MODELVIEW);
+    viz_pop_matrix();
 }
-#endif
 
 /* =================================================================
  *  3-D drawing
@@ -1835,10 +2272,6 @@ static void render(void) {
 
         glEnable(GL_BLEND);
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-#ifndef __EMSCRIPTEN__
-        glEnable(GL_LINE_STIPPLE);
-        glLineStipple(2, 0x00FF);
-#endif
         glLineWidth(1.0f);
 
         /* Box A's edge line (faint blue). */
@@ -1855,9 +2288,6 @@ static void render(void) {
         glVertex3f(bFar1.x, bFar1.y, bFar1.z);
         glEnd();
 
-#ifndef __EMSCRIPTEN__
-        glDisable(GL_LINE_STIPPLE);
-#endif
         glDisable(GL_BLEND);
 
         /* Yellow common-perpendicular segment between the two
@@ -2068,9 +2498,7 @@ static void on_mouse_wheel(float delta, int mx, int my) {
 
 static void on_key_down(int key) {
     if (key == KEY_ESCAPE) {
-#ifndef __EMSCRIPTEN__
-        PostQuitMessage(0);
-#endif
+        g_should_quit = 1;
     } else if (key == KEY_R) {
         reset_scene();
         PLAT_INVALIDATE();
@@ -2086,200 +2514,127 @@ static void on_key_down(int key) {
 }
 
 /* =================================================================
- *  Platform layer: windowing, main loop, entry point
+ *  Platform layer: SDL2 windowing + main loop (desktop and web).
  * ================================================================= */
 
-#ifdef __EMSCRIPTEN__
+static SDL_Window    *g_sdl_win = NULL;
+static SDL_GLContext  g_sdl_ctx = NULL;
 
-static void web_fb_size(GLFWwindow *w, int ww, int hh) {
-    (void)w; on_resize(ww, hh);
+static int sdl_button_to_my(int b) {
+    if (b == SDL_BUTTON_LEFT)  return 0;
+    if (b == SDL_BUTTON_RIGHT) return 1;
+    return -1;
 }
 
-static void web_cursor_pos(GLFWwindow *w, double x, double y) {
-    (void)w; on_mouse_move((int)x, (int)y);
-}
-
-static void web_mouse_button(GLFWwindow *w, int b, int action, int mods) {
-    (void)w; (void)mods;
-    double x, y;
-    glfwGetCursorPos(w, &x, &y);
-    int btn = (b == GLFW_MOUSE_BUTTON_LEFT) ? 0
-            : (b == GLFW_MOUSE_BUTTON_RIGHT) ? 1 : -1;
-    if (btn < 0) return;
-    if (action == GLFW_PRESS)        on_mouse_down(btn, (int)x, (int)y);
-    else if (action == GLFW_RELEASE) on_mouse_up(btn);
-}
-
-static void web_scroll(GLFWwindow *w, double dx, double dy) {
-    (void)dx;
-    double x, y;
-    glfwGetCursorPos(w, &x, &y);
-    on_mouse_wheel((float)dy, (int)x, (int)y);
-}
-
-static void web_key(GLFWwindow *w, int key, int sc, int action, int mods) {
-    (void)w; (void)sc; (void)mods;
-    if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
-    int k = 0;
-    switch (key) {
-        case GLFW_KEY_ESCAPE: k = KEY_ESCAPE; break;
-        case GLFW_KEY_R:      k = KEY_R;      break;
-        case GLFW_KEY_LEFT:   k = KEY_LEFT;   break;
-        case GLFW_KEY_RIGHT:  k = KEY_RIGHT;  break;
-        default: return;
+static int sdl_key_to_my(SDL_Keycode k) {
+    switch (k) {
+    case SDLK_ESCAPE: return KEY_ESCAPE;
+    case SDLK_r:      return KEY_R;
+    case SDLK_LEFT:   return KEY_LEFT;
+    case SDLK_RIGHT:  return KEY_RIGHT;
     }
-    on_key_down(k);
-}
-
-static void web_frame(void) {
-    glfwPollEvents();
-    render();
-}
-
-int main(void) {
-    reset_scene();
-
-    if (!glfwInit()) return 1;
-    g_window = glfwCreateWindow(win_w, win_h,
-        "Edge-Edge Motion  |  Signed Separation", NULL, NULL);
-    if (!g_window) { glfwTerminate(); return 1; }
-    glfwMakeContextCurrent(g_window);
-
-    glfwSetFramebufferSizeCallback(g_window, web_fb_size);
-    glfwSetCursorPosCallback      (g_window, web_cursor_pos);
-    glfwSetMouseButtonCallback    (g_window, web_mouse_button);
-    glfwSetScrollCallback         (g_window, web_scroll);
-    glfwSetKeyCallback            (g_window, web_key);
-
-    init_font();
-    emscripten_set_main_loop(web_frame, 0, 1);
     return 0;
 }
 
-#else  /* Windows */
-
-static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-    case WM_SIZE:
-        on_resize(LOWORD(lp), HIWORD(lp));
-        return 0;
-
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        BeginPaint(hw, &ps);
-        render();
-        EndPaint(hw, &ps);
-        return 0;
+static void plat_poll_events(void) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        switch (e.type) {
+        case SDL_QUIT:
+            g_should_quit = 1;
+            break;
+        case SDL_WINDOWEVENT:
+            if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+                e.window.event == SDL_WINDOWEVENT_RESIZED) {
+                on_resize(e.window.data1, e.window.data2);
+            }
+            break;
+        case SDL_MOUSEBUTTONDOWN: {
+            int b = sdl_button_to_my(e.button.button);
+            if (b >= 0) on_mouse_down(b, e.button.x, e.button.y);
+            break;
+        }
+        case SDL_MOUSEBUTTONUP: {
+            int b = sdl_button_to_my(e.button.button);
+            if (b >= 0) on_mouse_up(b);
+            break;
+        }
+        case SDL_MOUSEMOTION:
+            on_mouse_move(e.motion.x, e.motion.y);
+            break;
+        case SDL_MOUSEWHEEL: {
+            int mx = 0, my = 0;
+            SDL_GetMouseState(&mx, &my);
+            on_mouse_wheel((float)e.wheel.y, mx, my);
+            break;
+        }
+        case SDL_KEYDOWN: {
+            int k = sdl_key_to_my(e.key.keysym.sym);
+            if (k) on_key_down(k);
+            break;
+        }
+        }
     }
-
-    case WM_ERASEBKGND:
-        return 1;
-
-    case WM_LBUTTONDOWN:
-        on_mouse_down(0, (short)LOWORD(lp), (short)HIWORD(lp));
-        SetCapture(hw);
-        return 0;
-
-    case WM_LBUTTONUP:
-        on_mouse_up(0);
-        ReleaseCapture();
-        return 0;
-
-    case WM_RBUTTONDOWN:
-        on_mouse_down(1, (short)LOWORD(lp), (short)HIWORD(lp));
-        if (rmb_down) SetCapture(hw);
-        return 0;
-
-    case WM_RBUTTONUP:
-        on_mouse_up(1);
-        ReleaseCapture();
-        return 0;
-
-    case WM_MOUSEMOVE:
-        on_mouse_move((short)LOWORD(lp), (short)HIWORD(lp));
-        return 0;
-
-    case WM_MOUSEWHEEL: {
-        short delta = (short)HIWORD(wp);
-        POINT pt = { (short)LOWORD(lp), (short)HIWORD(lp) };
-        ScreenToClient(hw, &pt);
-        on_mouse_wheel((float)delta / (float)WHEEL_DELTA, pt.x, pt.y);
-        return 0;
-    }
-
-    case WM_KEYDOWN:
-        if (wp == VK_ESCAPE) on_key_down(KEY_ESCAPE);
-        else if (wp == 'R')  on_key_down(KEY_R);
-        else if (wp == VK_LEFT)  on_key_down(KEY_LEFT);
-        else if (wp == VK_RIGHT) on_key_down(KEY_RIGHT);
-        return 0;
-
-    case WM_DESTROY:
-        PostQuitMessage(0);
-        return 0;
-    }
-    return DefWindowProcA(hw, msg, wp, lp);
 }
 
-static bool init_gl(HWND hw) {
-    PIXELFORMATDESCRIPTOR pfd = {0};
-    pfd.nSize      = sizeof(pfd);
-    pfd.nVersion   = 1;
-    pfd.dwFlags    = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-    pfd.iPixelType = PFD_TYPE_RGBA;
-    pfd.cColorBits = 32;
-    pfd.cDepthBits = 24;
-    pfd.iLayerType = PFD_MAIN_PLANE;
-
-    g_hdc = GetDC(hw);
-    int pf = ChoosePixelFormat(g_hdc, &pfd);
-    if (!pf) return false;
-    SetPixelFormat(g_hdc, pf, &pfd);
-
-    g_hrc = wglCreateContext(g_hdc);
-    if (!g_hrc) return false;
-    wglMakeCurrent(g_hdc, g_hrc);
-    return true;
+static void plat_frame(void) {
+    plat_poll_events();
+    render();
+    SDL_GL_SwapWindow(g_sdl_win);
 }
 
-int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show) {
-    (void)prev; (void)cmd;
+static void plat_swap(void) { /* SDL_GL_SwapWindow is called in plat_frame */ }
 
-    reset_scene();
+int main(int argc, char **argv) {
+    (void)argc; (void)argv;
 
-    WNDCLASSA wc    = {0};
-    wc.style         = CS_OWNDC;
-    wc.lpfnWndProc   = wndproc;
-    wc.hInstance     = inst;
-    wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
-    wc.lpszClassName = "GaussMapViz";
-    RegisterClassA(&wc);
-
-    g_hwnd = CreateWindowA(
-        "GaussMapViz", "Edge-Edge Motion  |  Signed Separation",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, win_w, win_h,
-        NULL, NULL, inst, NULL);
-
-    if (!init_gl(g_hwnd)) {
-        MessageBoxA(NULL, "Failed to create OpenGL context.", "Error", MB_OK);
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
     }
 
-    init_font();
-    ShowWindow(g_hwnd, show);
-    UpdateWindow(g_hwnd);
-
-    MSG m;
-    while (GetMessageA(&m, NULL, 0, 0)) {
-        TranslateMessage(&m);
-        DispatchMessageA(&m);
-    }
-
-    wglMakeCurrent(NULL, NULL);
-    wglDeleteContext(g_hrc);
-    ReleaseDC(g_hwnd, g_hdc);
-    return (int)m.wParam;
-}
-
+#ifdef __EMSCRIPTEN__
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+#else
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
 #endif
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
+
+    g_sdl_win = SDL_CreateWindow(
+        "Edge-Edge Motion  |  Signed Separation",
+        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+        win_w, win_h,
+        SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    if (!g_sdl_win) {
+        fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
+        return 1;
+    }
+    g_sdl_ctx = SDL_GL_CreateContext(g_sdl_win);
+    if (!g_sdl_ctx) {
+        fprintf(stderr, "SDL_GL_CreateContext: %s\n", SDL_GetError());
+        return 1;
+    }
+    SDL_GL_MakeCurrent(g_sdl_win, g_sdl_ctx);
+    SDL_GL_SetSwapInterval(1);
+
+    viz_load_gl_funcs();
+    viz_init_gl();
+    init_font();
+    reset_scene();
+    glViewport(0, 0, win_w, win_h);
+
+#ifdef __EMSCRIPTEN__
+    emscripten_set_main_loop(plat_frame, 0, 1);
+#else
+    while (!g_should_quit) plat_frame();
+    SDL_GL_DeleteContext(g_sdl_ctx);
+    SDL_DestroyWindow(g_sdl_win);
+    SDL_Quit();
+#endif
+    return 0;
+}
