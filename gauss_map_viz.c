@@ -1618,7 +1618,6 @@ static void draw_slider(void) {
     glColor3f(0.60f, 0.60f, 0.66f);
     gl_text_2d(x0 - 8, SLIDER_H - 4, "0");
     gl_text_2d(x1 - 8, SLIDER_H - 4, "1");
-    gl_text_2d(x0 + (x1 - x0) / 2 - 40, SLIDER_H - 4, "start -------> end");
 }
 
 /* LHS sidebar with two vertical rotation-amount sliders. */
@@ -1914,32 +1913,15 @@ static void draw_sphere_wire_inset(void) {
 }
 
 static void draw_sphere_solid_inset(void) {
+    /* Translucent dark fill so the wire + arcs on the far side show
+       through.  Lighting is gone in the modern-GL port; a flat low-
+       alpha colour reads as a see-through sphere just fine.          */
     static GLUquadric *q = NULL;
     if (!q) q = gluNewQuadric();
-    gluQuadricDrawStyle(q, GLU_FILL);
-    gluQuadricNormals(q, GLU_SMOOTH);
-
-    glEnable(GL_LIGHTING);
-    glEnable(GL_LIGHT0);
-    {   float pos[]  = { 2, 3, 4, 0 };
-        float amb[]  = { 0.05f, 0.05f, 0.07f, 1 };
-        float diff[] = { 0.18f, 0.18f, 0.21f, 1 };
-        float spec[] = { 0.10f, 0.10f, 0.10f, 1 };
-        glLightfv(GL_LIGHT0, GL_POSITION, pos);
-        glLightfv(GL_LIGHT0, GL_AMBIENT,  amb);
-        glLightfv(GL_LIGHT0, GL_DIFFUSE,  diff);
-        glLightfv(GL_LIGHT0, GL_SPECULAR, spec);
-    }
-    {   float d[] = { 0.18f, 0.18f, 0.22f, 1 };
-        float s[] = { 0.30f, 0.30f, 0.30f, 1 };
-        float a[] = { 0.06f, 0.06f, 0.08f, 1 };
-        glMaterialfv(GL_FRONT, GL_DIFFUSE,  d);
-        glMaterialfv(GL_FRONT, GL_SPECULAR, s);
-        glMaterialfv(GL_FRONT, GL_AMBIENT,  a);
-        glMaterialf (GL_FRONT, GL_SHININESS, 32.0f);
-    }
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glColor4f(0.10f, 0.10f, 0.13f, 0.35f);
     gluSphere(q, 0.992, 40, 20);
-    glDisable(GL_LIGHTING);
 }
 
 static void draw_arc_inset(Vec3 a, Vec3 b,
@@ -2341,8 +2323,15 @@ static void render(void) {
 
     /* HUD strip between 3-D view and slider. */
     glColor3f(0.60f, 0.60f, 0.66f);
-    gl_text_2d(10, SLIDER_H + 18,
-        "LMB orbit   RMB trackball-rotate box   Wheel zoom   R reset   Esc quit");
+    {
+        const char *hud = "LMB orbit   RMB trackball-rotate box   Wheel zoom   R reset   Esc quit";
+        int hud_w = stb_easy_font_width((char*)hud);
+        int view_left  = SIDEBAR_W;
+        int view_right = win_w - INSET_W - 2 * INSET_PAD;
+        int cx = view_left + (view_right - view_left) / 2 - hud_w / 2;
+        if (cx < view_left + 6) cx = view_left + 6;
+        gl_text_2d(cx, SLIDER_H + 18, hud);
+    }
 
     if (colliding) {
         glColor3f(1.00f, 0.35f, 0.35f);
